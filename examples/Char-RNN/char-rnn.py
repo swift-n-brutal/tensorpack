@@ -1,24 +1,28 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: char-rnn.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+# Author: Yuxin Wu
 
+import argparse
 import numpy as np
+import operator
 import os
 import sys
-import argparse
 from collections import Counter
-import operator
 import six
-from six.moves import map, range
+import tensorflow as tf
+from six.moves import range
 
 from tensorpack import *
-from tensorpack.tfutils import symbolic_functions, summary, optimizer
+from tensorpack.tfutils import optimizer, summary
 from tensorpack.tfutils.gradproc import GlobalNormClip
-from tensorpack.utils.globvars import globalns as param
 
-import tensorflow as tf
 rnn = tf.contrib.rnn
+
+class _NS: pass  # noqa
+
+
+param = _NS()
 
 # some model hyperparams to set
 param.batch_size = 128
@@ -28,7 +32,7 @@ param.seq_len = 50
 param.grad_clip = 5.
 param.vocab_size = None
 param.softmax_temprature = 1
-param.corpus = 'input.txt'
+param.corpus = None
 
 
 class CharRNNData(RNGDataFlow):
@@ -53,10 +57,10 @@ class CharRNNData(RNGDataFlow):
         self.whole_seq = np.array([self.char2idx[c] for c in data], dtype='int32')
         logger.info("Corpus loaded. Vocab size: {}".format(self.vocab_size))
 
-    def size(self):
+    def __len__(self):
         return self._size
 
-    def get_data(self):
+    def __iter__(self):
         random_starts = self.rng.randint(
             0, self.whole_seq.shape[0] - self.seq_length - 1, (self._size,))
         for st in random_starts:
@@ -65,13 +69,11 @@ class CharRNNData(RNGDataFlow):
 
 
 class Model(ModelDesc):
-    def _get_inputs(self):
-        return [InputDesc(tf.int32, (None, param.seq_len), 'input'),
-                InputDesc(tf.int32, (None, param.seq_len), 'nextinput')]
+    def inputs(self):
+        return [tf.placeholder(tf.int32, (None, param.seq_len), 'input'),
+                tf.placeholder(tf.int32, (None, param.seq_len), 'nextinput')]
 
-    def _build_graph(self, inputs):
-        input, nextinput = inputs
-
+    def build_graph(self, input, nextinput):
         cell = rnn.MultiRNNCell([rnn.LSTMBlockCell(num_units=param.rnn_size)
                                 for _ in range(param.num_rnn_layer)])
 
@@ -79,7 +81,7 @@ class Model(ModelDesc):
             ret = tf.get_variable(n + '_unused', [param.batch_size, param.rnn_size],
                                   trainable=False,
                                   initializer=tf.constant_initializer())
-            ret = symbolic_functions.shapeless_placeholder(ret, 0, name=n)
+            ret = tf.placeholder_with_default(ret, shape=[None, param.rnn_size], name=n)
             return ret
         initial = (rnn.LSTMStateTuple(get_v('c0'), get_v('h0')),
                    rnn.LSTMStateTuple(get_v('c1'), get_v('h1')))
@@ -94,17 +96,18 @@ class Model(ModelDesc):
 
         # seqlen x (Bxrnnsize)
         output = tf.reshape(tf.concat(outputs, 1), [-1, param.rnn_size])  # (Bxseqlen) x rnnsize
-        logits = FullyConnected('fc', output, param.vocab_size, nl=tf.identity)
-        prob = tf.nn.softmax(logits / param.softmax_temprature, name='prob')
+        logits = FullyConnected('fc', output, param.vocab_size, activation=tf.identity)
+        tf.nn.softmax(logits / param.softmax_temprature, name='prob')
 
         xent_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             logits=logits, labels=tf.reshape(nextinput, [-1]))
-        self.cost = tf.reduce_mean(xent_loss, name='cost')
+        cost = tf.reduce_mean(xent_loss, name='cost')
         summary.add_param_summary(('.*/W', ['histogram']))   # monitor histogram of all W
-        summary.add_moving_summary(self.cost)
+        summary.add_moving_summary(cost)
+        return cost
 
-    def _get_optimizer(self):
-        lr = symbolic_functions.get_scalar_var('learning_rate', 2e-3, summary=True)
+    def optimizer(self):
+        lr = tf.get_variable('learning_rate', initializer=2e-3, trainable=False)
         opt = tf.train.AdamOptimizer(lr)
         return optimizer.apply_grad_processors(opt, [GlobalNormClip(5)])
 
@@ -116,7 +119,7 @@ def get_config():
     ds = BatchData(ds, param.batch_size)
 
     return TrainConfig(
-        dataflow=ds,
+        data=QueueInput(ds),
         callbacks=[
             ModelSaver(),
             ScheduledHyperParamSetter('learning_rate', [(25, 2e-4)])
@@ -177,6 +180,7 @@ if __name__ == '__main__':
     parser_sample.add_argument('-t', '--temperature', type=float,
                                default=1, help='softmax temperature')
     parser_train = subparsers.add_parser('train', help='train')
+    parser_train.add_argument('--corpus', help='corpus file', default='input.txt')
     args = parser.parse_args()
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -187,7 +191,8 @@ if __name__ == '__main__':
         sample(args.load, args.start, args.num)
         sys.exit()
     else:
+        param.corpus = args.corpus
         config = get_config()
         if args.load:
             config.session_init = SaverRestore(args.load)
-        QueueInputTrainer(config).train()
+        launch_train_with_config(config, SimpleTrainer())

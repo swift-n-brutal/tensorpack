@@ -1,14 +1,47 @@
-# tensorpack
-A neural net training interface based on TensorFlow.
+![Tensorpack](.github/tensorpack.png)
 
-[![Build Status](https://travis-ci.org/ppwwyyxx/tensorpack.svg?branch=master)](https://travis-ci.org/ppwwyyxx/tensorpack)
-[![ReadTheDoc](https://readthedocs.org/projects/tensorpack/badge/?version=latest)](http://tensorpack.readthedocs.io/en/latest/index.html)
-[![Gitter chat](https://badges.gitter.im/gitterHQ/gitter.png)](https://gitter.im/tensorpack/users)
+Tensorpack is a neural network training interface based on TensorFlow.
 
-See some [examples](examples) to learn about the framework:
+[![Build Status](https://travis-ci.org/tensorpack/tensorpack.svg?branch=master)](https://travis-ci.org/tensorpack/tensorpack)
+[![ReadTheDoc](https://readthedocs.org/projects/tensorpack/badge/?version=latest)](http://tensorpack.readthedocs.io)
+[![Gitter chat](https://img.shields.io/badge/chat-on%20gitter-46bc99.svg)](https://gitter.im/tensorpack/users)
+[![model-zoo](https://img.shields.io/badge/model-zoo-brightgreen.svg)](http://models.tensorpack.com)
+## Features:
+
+It's Yet Another TF high-level API, with __speed__, and __flexibility__ built together.
+
+1. Focus on __training speed__.
+	+ Speed comes for free with Tensorpack -- it uses TensorFlow in the __efficient way__ with no extra overhead.
+	  On common CNNs, it runs training [1.2~5x faster](https://github.com/tensorpack/benchmarks/tree/master/other-wrappers) than the equivalent Keras code.
+		Your training can probably gets faster if written with Tensorpack.
+
+	+ Data-parallel multi-GPU/distributed training strategy is off-the-shelf to use.
+    It scales as well as Google's [official benchmark](https://www.tensorflow.org/performance/benchmarks).
+
+	+ See [tensorpack/benchmarks](https://github.com/tensorpack/benchmarks) for
+    some benchmark scripts.
+
+2. Focus on __large datasets__.
+	+ [You don't usually need `tf.data`](http://tensorpack.readthedocs.io/tutorial/input-source.html#tensorflow-reader-cons).
+    Symbolic programming often makes data processing harder.
+	  Tensorpack helps you efficiently process large datasets (e.g. ImageNet) in __pure Python__ with autoparallelization.
+
+3. It's not a model wrapper.
+	+ There are too many symbolic function wrappers in the world. Tensorpack includes only a few common models.
+	  But you can use any symbolic function library inside Tensorpack, including tf.layers/Keras/slim/tflearn/tensorlayer/....
+
+See [tutorials and documentations](http://tensorpack.readthedocs.io/tutorial/index.html#user-tutorials) to know more about these features.
+
+## Examples:
+
+We refuse toy examples. We refuse low-quality implementations.
+Unlike most open source repos which only __implement__ papers,
+[Tensorpack examples](examples) faithfully __reproduce__ papers,
+demonstrating its __flexibility__ for actual research.
 
 ### Vision:
-+ [Multi-GPU training of ResNet on ImageNet](examples/ResNet)
++ [Train ResNet](examples/ResNet) and [other models](examples/ImageNetModels) on ImageNet.
++ [Train Mask/Faster R-CNN on COCO object detection](examples/FasterRCNN)
 + [Generative Adversarial Network(GAN) variants](examples/GAN), including DCGAN, InfoGAN, Conditional GAN, WGAN, BEGAN, DiscoGAN, Image to Image, CycleGAN.
 + [DoReFa-Net: train binary / low-bitwidth CNN on ImageNet](examples/DoReFa-Net)
 + [Fully-convolutional Network for Holistically-Nested Edge Detection(HED)](examples/HED)
@@ -25,46 +58,26 @@ See some [examples](examples) to learn about the framework:
 + [char-rnn for fun](examples/Char-RNN)
 + [LSTM language model on PennTreebank](examples/PennTreebank)
 
-Examples are not only for demonstration of the framework -- you can train them and reproduce the results in papers.
-
-## Features:
-
-It's Yet Another TF wrapper, but different in:
-1. Not focus on models.
-	+ There are already too many symbolic function wrappers.
-		Tensorpack includes only a few common models,
-	  but you can use any other wrappers within tensorpack, such as sonnet/Keras/slim/tflearn/tensorlayer/....
-
-2. Focus on __training speed__.
-	+	Speed comes for free with tensorpack -- it uses TensorFlow in the correct way.
-	  Even on a tiny CNN example, the training runs [1.6x faster](https://gist.github.com/ppwwyyxx/8d95da79f8d97036a7d67c2416c851b6) than the equivalent Keras code.
-
-	+ Data-parallel multi-GPU training is off-the-shelf to use. It is as fast as Google's [official benchmark](https://www.tensorflow.org/performance/benchmarks).
-
-	+ Data-parallel distributed training is off-the-shelf to use. It is as slow as Google's official benchmark.
-
-3. Focus on __large datasets__.
-	+ It's painful to read/preprocess data through TF. tensorpack helps you load large datasets (e.g. ImageNet) in __pure Python__ with autoparallelization.
-
-4. Interface of extensible __Callbacks__.
-	Write a callback to implement everything you want to do apart from the training iterations, and
-	enable it with one line of code. Common examples include:
-	+ Change hyperparameters during training
-	+ Print some tensors of interest
-	+ Monitor GPU utilization
-	+ Send error rate to your phone
-
-See [tutorials](http://tensorpack.readthedocs.io/en/latest/tutorial/index.html) to know more about these features.
-
 ## Install:
 
 Dependencies:
 
-+ Python 2 or 3
-+ TensorFlow >= 1.0.0 (>=1.1.0 for Multi-GPU)
-+ Python bindings for OpenCV (Optional, but required by a lot of features)
++ Python 2.7 or 3.3+. Python 2.7 is supported until [it retires in 2020](https://pythonclock.org/).
++ Python bindings for OpenCV. (Optional, but required by a lot of features)
++ TensorFlow ≥ 1.3. (Optional, if you only want to use `tensorpack.dataflow` alone as a data processing library)
 ```
-pip install -U git+https://github.com/ppwwyyxx/tensorpack.git
-# or add `--user` to avoid system-wide installation.
+pip install --upgrade git+https://github.com/tensorpack/tensorpack.git
+# or add `--user` to install to user's local directories
 ```
-Besides, if you only want to use `tensorpack.dataflow` alone as a data processing library, TensorFlow is also optional.
+
+## Citing Tensorpack:
+
+If you use Tensorpack in your research or wish to refer to the examples, please cite with:
+```
+@misc{wu2016tensorpack,
+  title={Tensorpack},
+  author={Wu, Yuxin and others},
+  howpublished={\url{https://github.com/tensorpack/}},
+  year={2016}
+}
+```

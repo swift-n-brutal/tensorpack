@@ -1,13 +1,13 @@
-# -*- coding: UTF-8 -*-
+# -*- coding: utf-8 -*-
 # File: misc.py
-# Author: Yuxin Wu <ppwwyyxx@gmail.com>
+
 
 import numpy as np
 import cv2
 
-from .base import ImageAugmentor
 from ...utils import logger
 from ...utils.argtools import shape2d
+from .base import ImageAugmentor
 from .transform import ResizeTransform, TransformAugmentorBase
 
 __all__ = ['Flip', 'Resize', 'RandomResize', 'ResizeShortestEdge', 'Transpose']
@@ -96,9 +96,9 @@ class ResizeShortestEdge(TransformAugmentorBase):
         h, w = img.shape[:2]
         scale = self.size * 1.0 / min(h, w)
         if h < w:
-            newh, neww = self.size, int(scale * w)
+            newh, neww = self.size, int(scale * w + 0.5)
         else:
-            newh, neww = int(scale * h), self.size
+            newh, neww = int(scale * h + 0.5), self.size
         return ResizeTransform(
             h, w, newh, neww, self.interp)
 
@@ -106,14 +106,14 @@ class ResizeShortestEdge(TransformAugmentorBase):
 class RandomResize(TransformAugmentorBase):
     """ Randomly rescale width and height of the image."""
 
-    def __init__(self, xrange, yrange, minimum=(0, 0), aspect_ratio_thres=0.15,
+    def __init__(self, xrange, yrange=None, minimum=(0, 0), aspect_ratio_thres=0.15,
                  interp=cv2.INTER_LINEAR):
         """
         Args:
             xrange (tuple): a (min, max) tuple. If is floating point, the
                 tuple defines the range of scaling ratio of new width, e.g. (0.9, 1.2).
                 If is integer, the tuple defines the range of new width in pixels, e.g. (200, 350).
-            yrange (tuple): similar to xrange, but for height.
+            yrange (tuple): similar to xrange, but for height. Should be None when aspect_ratio_thres==0.
             minimum (tuple): (xmin, ymin) in pixels. To avoid scaling down too much.
             aspect_ratio_thres (float): discard samples which change aspect ratio
                 larger than this threshold. Set to 0 to keep aspect ratio.
@@ -121,14 +121,21 @@ class RandomResize(TransformAugmentorBase):
         """
         super(RandomResize, self).__init__()
         assert aspect_ratio_thres >= 0
-        if aspect_ratio_thres == 0:
-            assert xrange == yrange
         self._init(locals())
 
         def is_float(tp):
             return isinstance(tp[0], float) or isinstance(tp[1], float)
-        assert is_float(xrange) == is_float(yrange), "xrange and yrange has different type!"
+
+        if yrange is not None:
+            assert is_float(xrange) == is_float(yrange), "xrange and yrange has different type!"
         self._is_scale = is_float(xrange)
+
+        if aspect_ratio_thres == 0:
+            if self._is_scale:
+                assert xrange == yrange or yrange is None
+            else:
+                if yrange is not None:
+                    logger.warn("aspect_ratio_thres==0, yrange is not used!")
 
     def _get_augment_params(self, img):
         cnt = 0
@@ -144,14 +151,14 @@ class RandomResize(TransformAugmentorBase):
                 destX = max(sx * w, self.minimum[0])
                 destY = max(sy * h, self.minimum[1])
             else:
-                sx = int(self._rand_range(*self.xrange))
+                sx = self._rand_range(*self.xrange)
                 if self.aspect_ratio_thres == 0:
                     sy = sx * 1.0 / w * h
                 else:
                     sy = self._rand_range(*self.yrange)
                 destX = max(sx, self.minimum[0])
                 destY = max(sy, self.minimum[1])
-            return (destX, destY)
+            return (int(destX + 0.5), int(destY + 0.5))
 
         while True:
             destX, destY = get_dest_size()
@@ -165,7 +172,7 @@ class RandomResize(TransformAugmentorBase):
                         logger.warn("RandomResize failed to augment an image")
                         return ResizeTransform(h, w, h, w, self.interp)
                     continue
-            return ResizeTransform(h, w, int(destY), int(destX), self.interp)
+            return ResizeTransform(h, w, destY, destX, self.interp)
 
 
 class Transpose(ImageAugmentor):

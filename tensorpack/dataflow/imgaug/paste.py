@@ -1,12 +1,11 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: paste.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+
+
+import numpy as np
+from abc import abstractmethod
 
 from .base import ImageAugmentor
-
-from abc import abstractmethod
-import numpy as np
 
 __all__ = ['CenterPaste', 'BackgroundFiller', 'ConstantBackgroundFiller',
            'RandomPaste']
@@ -85,7 +84,7 @@ class CenterPaste(ImageAugmentor):
 
 class RandomPaste(CenterPaste):
     """
-    Randomly paste the image onto a background convas.
+    Randomly paste the image onto a background canvas.
     """
 
     def _get_augment_params(self, img):

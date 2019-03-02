@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 # File: checkpoint-prof.py
 
-import tensorflow as tf
-import numpy as np
-from tensorpack import get_default_sess_config, get_op_tensor_name
-from tensorpack.utils import logger
-from tensorpack.tfutils.sessinit import get_model_loader
 import argparse
+import numpy as np
+import tensorflow as tf
+
+from tensorpack import get_default_sess_config, get_op_tensor_name
+from tensorpack.tfutils.sessinit import get_model_loader
+from tensorpack.utils import logger
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -21,7 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('--print-timing', action='store_true')
     args = parser.parse_args()
 
-    tf.train.import_meta_graph(args.meta)
+    tf.train.import_meta_graph(args.meta, clear_devices=True)
     G = tf.get_default_graph()
     with tf.Session(config=get_default_sess_config()) as sess:
         init = get_model_loader(args.model)

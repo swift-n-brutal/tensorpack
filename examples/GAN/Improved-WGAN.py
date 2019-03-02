@@ -1,17 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: Improved-WGAN.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+# Author: Yuxin Wu
 
-import os
-import argparse
-
-from tensorpack import *
-from tensorpack.tfutils.summary import add_moving_summary
-from tensorpack.utils.globvars import globalns as G
-from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
 import tensorflow as tf
 
+from tensorpack import *
+from tensorpack.tfutils import get_tf_version_tuple
+from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
+from tensorpack.tfutils.summary import add_moving_summary
+
+import DCGAN
 from GAN import SeparateGANTrainer
 
 """
@@ -20,10 +19,7 @@ See the docstring in DCGAN.py for usage.
 """
 
 # Don't want to mix two examples together, but want to reuse the code.
-# So here just import stuff from DCGAN, and change the batch size & model
-import DCGAN
-G.BATCH = 64
-G.Z_DIM = 128
+# So here just import stuff from DCGAN.
 
 
 class Model(DCGAN.Model):
@@ -31,33 +27,34 @@ class Model(DCGAN.Model):
     @auto_reuse_variable_scope
     def discriminator(self, imgs):
         nf = 64
-        with argscope(Conv2D, nl=tf.identity, kernel_shape=4, stride=2), \
-                argscope(LeakyReLU, alpha=0.2):
+        with argscope(Conv2D, activation=tf.identity, kernel_size=4, strides=2):
             l = (LinearWrap(imgs)
-                 .Conv2D('conv0', nf, nl=LeakyReLU)
+                 .Conv2D('conv0', nf, activation=tf.nn.leaky_relu)
                  .Conv2D('conv1', nf * 2)
-                 .LayerNorm('ln1').LeakyReLU()
+                 .LayerNorm('ln1')
+                 .tf.nn.leaky_relu()
                  .Conv2D('conv2', nf * 4)
-                 .LayerNorm('ln2').LeakyReLU()
+                 .LayerNorm('ln2')
+                 .tf.nn.leaky_relu()
                  .Conv2D('conv3', nf * 8)
-                 .LayerNorm('ln3').LeakyReLU()
-                 .FullyConnected('fct', 1, nl=tf.identity)())
+                 .LayerNorm('ln3')
+                 .tf.nn.leaky_relu()
+                 .FullyConnected('fct', 1, activation=tf.identity)())
         return tf.reshape(l, [-1])
 
-    def _build_graph(self, inputs):
-        image_pos = inputs[0]
+    def build_graph(self, image_pos):
         image_pos = image_pos / 128.0 - 1
 
-        z = tf.random_normal([G.BATCH, G.Z_DIM], name='z_train')
-        z = tf.placeholder_with_default(z, [None, G.Z_DIM], name='z')
+        z = tf.random_normal([self.batch, self.zdim], name='z_train')
+        z = tf.placeholder_with_default(z, [None, self.zdim], name='z')
 
-        with argscope([Conv2D, Deconv2D, FullyConnected],
-                      W_init=tf.truncated_normal_initializer(stddev=0.02)):
+        with argscope([Conv2D, Conv2DTranspose, FullyConnected],
+                      kernel_initializer=tf.truncated_normal_initializer(stddev=0.02)):
             with tf.variable_scope('gen'):
                 image_gen = self.generator(z)
             tf.summary.image('generated-samples', image_gen, max_outputs=30)
 
-            alpha = tf.random_uniform(shape=[G.BATCH, 1, 1, 1],
+            alpha = tf.random_uniform(shape=[self.batch, 1, 1, 1],
                                       minval=0., maxval=1., name='alpha')
             interp = image_pos + alpha * (image_gen - image_pos)
 
@@ -81,25 +78,24 @@ class Model(DCGAN.Model):
 
         self.collect_variables()
 
-    def _get_optimizer(self):
-        lr = symbolic_functions.get_scalar_var('learning_rate', 1e-4, summary=True)
-        opt = tf.train.AdamOptimizer(lr, beta1=0.5, beta2=0.9)
+    def optimizer(self):
+        opt = tf.train.AdamOptimizer(1e-4, beta1=0.5, beta2=0.9)
         return opt
 
 
 if __name__ == '__main__':
-    args = DCGAN.get_args()
+    assert get_tf_version_tuple() >= (1, 4)
+    args = DCGAN.get_args(default_batch=64, default_z_dim=128)
+    M = Model(shape=args.final_size, batch=args.batch, z_dim=args.z_dim)
     if args.sample:
-        DCGAN.sample(Model(), args.load)
+        DCGAN.sample(M, args.load)
     else:
-        assert args.data
         logger.auto_set_dir()
-        config = TrainConfig(
-            model=Model(),
-            dataflow=DCGAN.get_data(args.data),
+        SeparateGANTrainer(
+            QueueInput(DCGAN.get_data()),
+            M, g_period=6).train_with_defaults(
             callbacks=[ModelSaver()],
             steps_per_epoch=300,
             max_epoch=200,
             session_init=SaverRestore(args.load) if args.load else None
         )
-        SeparateGANTrainer(config, g_period=6).train()

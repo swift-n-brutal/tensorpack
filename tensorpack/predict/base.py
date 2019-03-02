@@ -1,15 +1,14 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: base.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
 
-from abc import abstractmethod, ABCMeta
-import tensorflow as tf
+
+from abc import ABCMeta, abstractmethod
 import six
+import tensorflow as tf
 
+from ..input_source import PlaceholderInput
 from ..tfutils.common import get_tensors_by_names
-from ..tfutils.tower import TowerContext
-from ..graph_builder.input_source import PlaceholderInput
+from ..tfutils.tower import PredictTowerContext
 
 __all__ = ['PredictorBase', 'AsyncPredictorBase',
            'OnlinePredictor', 'OfflinePredictor',
@@ -23,29 +22,20 @@ class PredictorBase(object):
 
     Attributes:
         return_input (bool): whether the call will also return (inputs, outputs)
-            or just outpus
+            or just outputs
     """
 
-    def __call__(self, *args):
+    def __call__(self, *dp):
         """
         Call the predictor on some inputs.
 
-        If ``len(args) == 1``, assume ``args[0]`` is a datapoint (a list).
-        otherwise, assume ``args`` is a datapoinnt
-
-        Examples:
-            When you have a predictor which takes a datapoint [e1, e2], you
-            can call it in two ways:
+        Example:
+            When you have a predictor defined with two inputs, call it with:
 
             .. code-block:: python
 
                 predictor(e1, e2)
-                predictor([e1, e2])
         """
-        if len(args) != 1:
-            dp = args
-        else:
-            dp = args[0]
         output = self._do_call(dp)
         if self.return_input:
             return (dp, output)
@@ -92,6 +82,14 @@ class OnlinePredictor(PredictorBase):
     """ A predictor which directly use an existing session and given tensors.
     """
 
+    ACCEPT_OPTIONS = False
+    """ See Session.make_callable """
+
+    sess = None
+    """
+    The tf.Session object associated with this predictor.
+    """
+
     def __init__(self, input_tensors, output_tensors,
                  return_input=False, sess=None):
         """
@@ -101,25 +99,53 @@ class OnlinePredictor(PredictorBase):
             return_input (bool): same as :attr:`PredictorBase.return_input`.
             sess (tf.Session): the session this predictor runs in. If None,
                 will use the default session at the first call.
+                Note that in TensorFlow, default session is thread-local.
         """
         self.return_input = return_input
         self.input_tensors = input_tensors
         self.output_tensors = output_tensors
         self.sess = sess
 
+        if sess is not None:
+            self._callable = sess.make_callable(
+                fetches=output_tensors,
+                feed_list=input_tensors,
+                accept_options=self.ACCEPT_OPTIONS)
+        else:
+            self._callable = None
+
     def _do_call(self, dp):
         assert len(dp) == len(self.input_tensors), \
             "{} != {}".format(len(dp), len(self.input_tensors))
-        feed = dict(zip(self.input_tensors, dp))
         if self.sess is None:
             self.sess = tf.get_default_session()
-        output = self.sess.run(self.output_tensors, feed_dict=feed)
-        return output
+            assert self.sess is not None, "Predictor isn't called under a default session!"
+
+        if self._callable is None:
+            self._callable = self.sess.make_callable(
+                fetches=self.output_tensors,
+                feed_list=self.input_tensors,
+                accept_options=self.ACCEPT_OPTIONS)
+        # run_metadata = tf.RunMetadata()
+        # options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+        return self._callable(*dp)
 
 
 class OfflinePredictor(OnlinePredictor):
     """ A predictor built from a given config.
-        A sinlge-tower model will be built without any prefix. """
+        A single-tower model will be built without any prefix.
+
+        Example:
+
+        .. code-block:: python
+
+            config = PredictConfig(model=my_model,
+                                   inputs_names=['image'],
+                                   output_names=['linear/output', 'prediction'])
+            predictor = OfflinePredictor(config)
+            batch_image = np.random.rand(1, 100, 100, 3)
+            batch_output, batch_prediction = predictor(batch_image)
+    """
 
     def __init__(self, config):
         """
@@ -129,14 +155,15 @@ class OfflinePredictor(OnlinePredictor):
         self.graph = config._maybe_create_graph()
         with self.graph.as_default():
             input = PlaceholderInput()
-            input.setup(config.model.get_inputs_desc())
-            with TowerContext('', is_training=False):
-                config.model.build_graph(input)
+            input.setup(config.inputs_desc)
+            with PredictTowerContext(''):
+                config.tower_func(*input.get_input_tensors())
 
             input_tensors = get_tensors_by_names(config.input_names)
             output_tensors = get_tensors_by_names(config.output_names)
 
+            config.session_init._setup_graph()
             sess = config.session_creator.create_session()
-            config.session_init.init(sess)
+            config.session_init._run_init(sess)
             super(OfflinePredictor, self).__init__(
                 input_tensors, output_tensors, config.return_input, sess)

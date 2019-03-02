@@ -1,19 +1,21 @@
-# -*- coding: UTF-8 -*-
+# -*- coding: utf-8 -*-
 # File: common.py
-# Author: Yuxin Wu <ppwwyyxx@gmail.com>
 
 from __future__ import division
+import itertools
 import numpy as np
-from copy import copy
 import pprint
+from collections import defaultdict, deque
+from copy import copy
+import six
+import tqdm
+from six.moves import map, range
 from termcolor import colored
-from collections import deque, defaultdict
-from six.moves import range, map
 
-from .base import DataFlow, ProxyDataFlow, RNGDataFlow, DataFlowReentrantGuard
 from ..utils import logger
-from ..utils.utils import get_tqdm, get_rng
 from ..utils.develop import log_deprecated
+from ..utils.utils import get_rng, get_tqdm, get_tqdm_kwargs
+from .base import DataFlow, DataFlowReentrantGuard, ProxyDataFlow, RNGDataFlow
 
 __all__ = ['TestDataSpeed', 'PrintData', 'BatchData', 'BatchDataByShape', 'FixedSizeData', 'MapData',
            'MapDataComponent', 'RepeatedData', 'RepeatedDataPoint', 'RandomChooseData',
@@ -23,89 +25,94 @@ __all__ = ['TestDataSpeed', 'PrintData', 'BatchData', 'BatchDataByShape', 'Fixed
 
 class TestDataSpeed(ProxyDataFlow):
     """ Test the speed of some DataFlow """
-    def __init__(self, ds, size=5000):
+    def __init__(self, ds, size=5000, warmup=0):
         """
         Args:
             ds (DataFlow): the DataFlow to test.
             size (int): number of datapoints to fetch.
+            warmup (int): warmup iterations
         """
         super(TestDataSpeed, self).__init__(ds)
-        self.test_size = size
+        self.test_size = int(size)
+        self.warmup = int(warmup)
 
-    def get_data(self):
+    def __iter__(self):
         """ Will run testing at the beginning, then produce data normally. """
         self.start_test()
-        for dp in self.ds.get_data():
+        for dp in self.ds:
             yield dp
 
     def start_test(self):
+        log_deprecated("TestDataSpeed.start_test() was renamed to start()", "2019-03-30")
+        self.start()
+
+    def start(self):
         """
         Start testing with a progress bar.
         """
         self.ds.reset_state()
+        itr = self.ds.__iter__()
+        if self.warmup:
+            for _ in tqdm.trange(self.warmup, **get_tqdm_kwargs()):
+                next(itr)
         # add smoothing for speed benchmark
         with get_tqdm(total=self.test_size,
                       leave=True, smoothing=0.2) as pbar:
-            for idx, dp in enumerate(self.ds.get_data()):
+            for idx, dp in enumerate(itr):
                 pbar.update()
                 if idx == self.test_size - 1:
                     break
 
-    def start(self):
-        """
-        Alias of start_test.
-        """
-        self.start_test()
-
 
 class BatchData(ProxyDataFlow):
     """
-    Concat datapoints into batches.
+    Stack datapoints into batches.
     It produces datapoints of the same number of components as ``ds``, but
     each component has one new extra dimension of size ``batch_size``.
-    A batch can be either a list of original components, or (by default)
+    The batch can be either a list of original components, or (by default)
     a numpy array of original components.
     """
 
     def __init__(self, ds, batch_size, remainder=False, use_list=False):
         """
         Args:
-            ds (DataFlow): When ``use_list=False``, the components of ``ds``
-                must be either scalars or :class:`np.ndarray`, and
-                components has to have consistent shape across ``ds``.
+            ds (DataFlow): A dataflow that produces either list or dict.
+                When ``use_list=False``, the components of ``ds``
+                must be either scalars or :class:`np.ndarray`, and have to be consistent in shapes.
             batch_size(int): batch size
             remainder (bool): When the remaining datapoints in ``ds`` is not
                 enough to form a batch, whether or not to also produce the remaining
                 data as a smaller batch.
-                If set to False, all generated datapoints are guranteed to have the same batch size.
+                If set to False, all produced datapoints are guaranteed to have the same batch size.
+                If set to True, `len(ds)` must be accurate.
             use_list (bool): if True, each component will contain a list
-                of datapoints instead of an numpy array of datapoints. This also avoids an extra copy.
+                of datapoints instead of an numpy array of an extra dimension.
         """
         super(BatchData, self).__init__(ds)
         if not remainder:
             try:
-                assert batch_size <= ds.size()
+                assert batch_size <= len(ds)
             except NotImplementedError:
                 pass
-        self.batch_size = batch_size
+        self.batch_size = int(batch_size)
         self.remainder = remainder
         self.use_list = use_list
 
-    def size(self):
-        ds_size = self.ds.size()
+    def __len__(self):
+        ds_size = len(self.ds)
         div = ds_size // self.batch_size
         rem = ds_size % self.batch_size
         if rem == 0:
             return div
         return div + int(self.remainder)
 
-    def get_data(self):
+    def __iter__(self):
         """
         Yields:
             Batched data by stacking each component on an extra 0th dimension.
         """
         holder = []
-        for data in self.ds.get_data():
+        for data in self.ds:
             holder.append(data)
             if len(holder) == self.batch_size:
                 yield BatchData._aggregate_batch(holder, self.use_list)
@@ -114,39 +121,53 @@ class BatchData(ProxyDataFlow):
             yield BatchData._aggregate_batch(holder, self.use_list)
 
     @staticmethod
+    def _batch_numpy(data_list):
+        data = data_list[0]
+        if isinstance(data, six.integer_types):
+            dtype = 'int32'
+        elif type(data) == bool:
+            dtype = 'bool'
+        elif type(data) == float:
+            dtype = 'float32'
+        elif isinstance(data, (six.binary_type, six.text_type)):
+            dtype = 'str'
+        else:
+            try:
+                dtype = data.dtype
+            except AttributeError:
+                raise TypeError("Unsupported type to batch: {}".format(type(data)))
+        try:
+            return np.asarray(data_list, dtype=dtype)
+        except Exception as e:  # noqa
+            logger.exception("Cannot batch data. Perhaps they are of inconsistent shape?")
+            if isinstance(data, np.ndarray):
+                s = pprint.pformat([x.shape for x in data_list])
+                logger.error("Shape of all arrays to be batched: " + s)
+            try:
+                # open an ipython shell if possible
+                import IPython as IP; IP.embed()    # noqa
+            except ImportError:
+                pass
+
+    @staticmethod
     def _aggregate_batch(data_holder, use_list=False):
-        size = len(data_holder[0])
-        result = []
-        for k in range(size):
-            if use_list:
-                result.append(
-                    [x[k] for x in data_holder])
-            else:
-                dt = data_holder[0][k]
-                if type(dt) in [int, bool]:
-                    tp = 'int32'
-                elif type(dt) == float:
-                    tp = 'float32'
+        first_dp = data_holder[0]
+        if isinstance(first_dp, (list, tuple)):
+            result = []
+            for k in range(len(first_dp)):
+                data_list = [x[k] for x in data_holder]
+                if use_list:
+                    result.append(data_list)
                 else:
-                    try:
-                        tp = dt.dtype
-                    except:
-                        raise TypeError("Unsupported type to batch: {}".format(type(dt)))
-                try:
-                    result.append(
-                        np.asarray([x[k] for x in data_holder], dtype=tp))
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:  # noqa
-                    logger.exception("Cannot batch data. Perhaps they are of inconsistent shape?")
-                    if isinstance(dt, np.ndarray):
-                        s = pprint.pformat([x[k].shape for x in data_holder])
-                        logger.error("Shape of all arrays to be batched: " + s)
-                    try:
-                        # open an ipython shell if possible
-                        import IPython as IP; IP.embed()    # noqa
-                    except:
-                        pass
+                    result.append(BatchData._batch_numpy(data_list))
+        elif isinstance(first_dp, dict):
+            result = {}
+            for key in first_dp.keys():
+                data_list = [x[key] for x in data_holder]
+                if use_list:
+                    result[key] = data_list
+                else:
+                    result[key] = BatchData._batch_numpy(data_list)
         return result
 
 
@@ -178,9 +199,9 @@ class BatchDataByShape(BatchData):
         super(BatchDataByShape, self).reset_state()
         self.holder = defaultdict(list)
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard:
-            for dp in self.ds.get_data():
+            for dp in self.ds:
                 shp = dp[self.idx].shape
                 holder = self.holder[shp]
                 holder.append(dp)
@@ -191,48 +212,74 @@ class BatchDataByShape(BatchData):
 
 class FixedSizeData(ProxyDataFlow):
     """ Generate data from another DataFlow, but with a fixed total count.
-        The iterator state of the underlying DataFlow will be kept if not exhausted.
     """
-    def __init__(self, ds, size):
+    def __init__(self, ds, size, keep_state=True):
         """
         Args:
             ds (DataFlow): input dataflow
             size (int): size
+            keep_state (bool): keep the iterator state of ``ds``
+                between calls to :meth:`__iter__()`, so that the
+                next call will continue the previous iteration over ``ds``,
+                instead of reinitializing an iterator.
+
+        Example:
+
+        .. code-block:: none
+
+            ds produces: 1, 2, 3, 4, 5; 1, 2, 3, 4, 5; ...
+            FixedSizeData(ds, 3, True): 1, 2, 3; 4, 5, 1; 2, 3, 4; ...
+            FixedSizeData(ds, 3, False): 1, 2, 3; 1, 2, 3; ...
+            FixedSizeData(ds, 6, False): 1, 2, 3, 4, 5, 1; 1, 2, 3, 4, 5, 1;...
         """
         super(FixedSizeData, self).__init__(ds)
         self._size = int(size)
         self.itr = None
         self._guard = DataFlowReentrantGuard()
+        self._keep = keep_state
 
-    def size(self):
+    def __len__(self):
         return self._size
 
-    def get_data(self):
+    def reset_state(self):
+        super(FixedSizeData, self).reset_state()
+        self.itr = self.ds.__iter__()
+
+    def __iter__(self):
         with self._guard:
             if self.itr is None:
-                self.itr = self.ds.get_data()
+                self.itr = self.ds.__iter__()
             cnt = 0
             while True:
                 try:
                     dp = next(self.itr)
                 except StopIteration:
-                    self.itr = self.ds.get_data()
+                    self.itr = self.ds.__iter__()
                     dp = next(self.itr)
 
                 cnt += 1
                 yield dp
                 if cnt == self._size:
+                    if not self._keep:
+                        self.itr = None
                     return
 
 
 class MapData(ProxyDataFlow):
     """
-    Apply a mapper/filter on the DataFlow.
+    Apply a mapper/filter on the datapoints of a DataFlow.
 
     Note:
-        1. Please make sure func doesn't modify the components
+        1. Please make sure func doesn't modify its arguments in place,
            unless you're certain it's safe.
-        2. If you discard some datapoints, ``ds.size()`` will be incorrect.
+        2. If you discard some datapoints, ``len(ds)`` will be incorrect.
+
+    Example:
+
+        .. code-block:: none
+
+            ds = Mnist('train)
+            ds = MapData(ds, lambda dp: [dp[0] * 255, dp[1]])
     """
 
     def __init__(self, ds, func):
@@ -240,14 +287,14 @@ class MapData(ProxyDataFlow):
         Args:
             ds (DataFlow): input DataFlow
             func (datapoint -> datapoint | None): takes a datapoint and returns a new
-                datapoint. Return None to discard this datapoint.
+                datapoint. Return None to discard/skip this datapoint.
         """
         super(MapData, self).__init__(ds)
         self.func = func
 
-    def get_data(self):
-        for dp in self.ds.get_data():
-            ret = self.func(dp)
+    def __iter__(self):
+        for dp in self.ds:
+            ret = self.func(copy(dp))  # shallow copy the list
             if ret is not None:
                 yield ret
 
@@ -258,28 +305,38 @@ class MapDataComponent(MapData):
 
     Note:
         1. This dataflow itself doesn't modify the datapoints.
-           But please make sure func doesn't modify the components
+           But please make sure func doesn't modify its arguments in place,
            unless you're certain it's safe.
-        2. If you discard some datapoints, ``ds.size()`` will be incorrect.
+        2. If you discard some datapoints, ``len(ds)`` will be incorrect.
+
+    Example:
+
+        .. code-block:: none
+
+            ds = Mnist('train)
+            ds = MapDataComponent(ds, lambda img: img * 255, 0)
     """
     def __init__(self, ds, func, index=0):
         """
         Args:
-            ds (DataFlow): input DataFlow.
+            ds (DataFlow): input DataFlow which produces either list or dict.
             func (TYPE -> TYPE|None): takes ``dp[index]``, returns a new value for ``dp[index]``.
-                return None to discard this datapoint.
-            index (int): index of the component.
+                Return None to discard/skip this datapoint.
+            index (int or str): index or key of the component.
         """
-        index = int(index)
+        self._index = index
+        self._func = func
+        super(MapDataComponent, self).__init__(ds, self._mapper)
 
-        def f(dp):
-            r = func(dp[index])
-            if r is None:
-                return None
-            dp = copy(dp)   # avoid modifying the list
-            dp[index] = r
-            return dp
-        super(MapDataComponent, self).__init__(ds, f)
+    def _mapper(self, dp):
+        r = self._func(dp[self._index])
+        if r is None:
+            return None
+        dp = copy(dp)   # shallow copy to avoid modifying the datapoint
+        if isinstance(dp, tuple):
+            dp = list(dp)  # to be able to modify it in the next line
+        dp[self._index] = r
+        return dp
 
 
 class RepeatedData(ProxyDataFlow):
@@ -298,23 +355,23 @@ class RepeatedData(ProxyDataFlow):
         self.nr = nr
         super(RepeatedData, self).__init__(ds)
 
-    def size(self):
+    def __len__(self):
         """
         Raises:
             :class:`ValueError` when nr == -1.
         """
         if self.nr == -1:
-            raise ValueError("size() is unavailable for infinite dataflow")
-        return self.ds.size() * self.nr
+            raise NotImplementedError("__len__() is unavailable for infinite dataflow")
+        return len(self.ds) * self.nr
 
-    def get_data(self):
+    def __iter__(self):
         if self.nr == -1:
             while True:
-                for dp in self.ds.get_data():
+                for dp in self.ds:
                     yield dp
         else:
             for _ in range(self.nr):
-                for dp in self.ds.get_data():
+                for dp in self.ds:
                     yield dp
 
 
@@ -334,11 +391,11 @@ class RepeatedDataPoint(ProxyDataFlow):
         assert self.nr >= 1, self.nr
         super(RepeatedDataPoint, self).__init__(ds)
 
-    def size(self):
-        return self.ds.size() * self.nr
+    def __len__(self):
+        return len(self.ds) * self.nr
 
-    def get_data(self):
-        for dp in self.ds.get_data():
+    def __iter__(self):
+        for dp in self.ds:
             for _ in range(self.nr):
                 yield dp
 
@@ -371,8 +428,8 @@ class RandomChooseData(RNGDataFlow):
             else:
                 d.reset_state()
 
-    def get_data(self):
-        itrs = [v[0].get_data() for v in self.df_lists]
+    def __iter__(self):
+        itrs = [v[0].__iter__() for v in self.df_lists]
         probs = np.array([v[1] for v in self.df_lists])
         try:
             while True:
@@ -384,35 +441,35 @@ class RandomChooseData(RNGDataFlow):
 
 class RandomMixData(RNGDataFlow):
     """
-    Perfectly mix datapoints from several DataFlow using their :meth:`size()`.
-    Will stop when all DataFlow exhausted.
+    Perfectly mix datapoints from several DataFlow using their
+    :meth:`__len__()`. Will stop when all DataFlow exhausted.
     """
 
     def __init__(self, df_lists):
         """
         Args:
             df_lists (list): a list of DataFlow.
-                All DataFlow must implement ``size()``.
+                All DataFlow must implement ``__len__()``.
         """
         super(RandomMixData, self).__init__()
         self.df_lists = df_lists
-        self.sizes = [k.size() for k in self.df_lists]
+        self.sizes = [len(k) for k in self.df_lists]
 
     def reset_state(self):
         super(RandomMixData, self).reset_state()
         for d in self.df_lists:
             d.reset_state()
 
-    def size(self):
+    def __len__(self):
         return sum(self.sizes)
 
-    def get_data(self):
+    def __iter__(self):
         sums = np.cumsum(self.sizes)
-        idxs = np.arange(self.size())
+        idxs = np.arange(self.__len__())
         self.rng.shuffle(idxs)
         idxs = np.array(list(map(
             lambda x: np.searchsorted(sums, x, 'right'), idxs)))
-        itrs = [k.get_data() for k in self.df_lists]
+        itrs = [k.__iter__() for k in self.df_lists]
         assert idxs.max() == len(itrs) - 1, "{}!={}".format(idxs.max(), len(itrs) - 1)
         for k in idxs:
             yield next(itrs[k])
@@ -437,26 +494,32 @@ class ConcatData(DataFlow):
         for d in self.df_lists:
             d.reset_state()
 
-    def size(self):
-        return sum([x.size() for x in self.df_lists])
+    def __len__(self):
+        return sum([len(x) for x in self.df_lists])
 
-    def get_data(self):
+    def __iter__(self):
         for d in self.df_lists:
-            for dp in d.get_data():
+            for dp in d.__iter__():
                 yield dp
 
 
 class JoinData(DataFlow):
     """
-    Join the components from each DataFlow.
+    Join the components from each DataFlow. See below for its behavior.
+    Dataflow that produces lists and dataflow that produces dicts
+    cannot be joined.
 
-    Examples:
+    Example:
 
     .. code-block:: none
 
         df1 produces: [c1, c2]
         df2 produces: [c3, c4]
         joined: [c1, c2, c3, c4]
+
+        df1 produces: {"a":c1, "b":c2}
+        df2 produces: {"c":c3}
+        joined: {"a":c1, "b":c2, "c":c3}
     """
 
     def __init__(self, df_lists):
@@ -465,37 +528,43 @@ class JoinData(DataFlow):
             df_lists (list): a list of DataFlow.
                 When these dataflows have different sizes, JoinData will stop when any
                 of them is exhausted.
+                The list could contain the same DataFlow instance more than once,
+                but note that `__iter__` will then also be called many times.
         """
         self.df_lists = df_lists
 
         try:
-            self._size = self.df_lists[0].size()
+            self._size = len(self.df_lists[0])
             for d in self.df_lists:
-                assert d.size() == self._size, \
-                    "All DataFlow must have the same size! {} != {}".format(d.size(), self._size)
+                assert len(d) == self._size, \
+                    "All DataFlow must have the same size! {} != {}".format(len(d), self._size)
         except Exception:
             logger.info("[JoinData] Size check failed for the list of dataflow to be joined!")
 
     def reset_state(self):
-        for d in self.df_lists:
+        for d in set(self.df_lists):
             d.reset_state()
 
-    def size(self):
-        return min([k.size() for k in self.df_lists])
+    def __len__(self):
+        """
+        Return the minimum size among all.
+        """
+        return min([len(k) for k in self.df_lists])
 
-    def get_data(self):
-        itrs = [k.get_data() for k in self.df_lists]
+    def __iter__(self):
+        itrs = [k.__iter__() for k in self.df_lists]
         try:
             while True:
-                dp = []
-                for itr in itrs:
-                    dp.extend(next(itr))
+                all_dps = [next(itr) for itr in itrs]
+                if isinstance(all_dps[0], (list, tuple)):
+                    dp = list(itertools.chain(*all_dps))
+                else:
+                    dp = {}
+                    for x in all_dps:
+                        dp.update(x)
                 yield dp
         except StopIteration:   # some of them are exhausted
             pass
-        finally:
-            for itr in itrs:
-                del itr
 
 
 def SelectComponent(ds, idxs):
@@ -518,9 +587,23 @@ def SelectComponent(ds, idxs):
 
 
 class LocallyShuffleData(ProxyDataFlow, RNGDataFlow):
-    """ Maintain a pool to buffer datapoints, and shuffle before producing them.
+    """ Buffer the datapoints from a given dataflow, and shuffle them before producing them.
         This can be used as an alternative when a complete random read is too expensive
         or impossible for the data source.
+
+        This dataflow has the following behavior:
+
+        1. It takes datapoints from the given dataflow `ds` to an internal buffer of fixed size.
+           Each datapoint is duplicated for `nr_reuse` times.
+        2. Once the buffer is full, this dataflow starts to yield data from the beginning of the buffer,
+           and new datapoints will be added to the end of the buffer. This is like a FIFO queue.
+        3. The internal buffer is shuffled after every `shuffle_interval` datapoints that come from `ds`.
+
+        To maintain shuffling states, this dataflow is not reentrant.
+
+        Datapoints from one pass of `ds` will get mixed with datapoints from a different pass.
+        As a result, the iterator of this dataflow will run indefinitely
+        because it does not make sense to stop the iteration anywhere.
     """
 
     def __init__(self, ds, buffer_size, nr_reuse=1, shuffle_interval=None):
@@ -528,12 +611,12 @@ class LocallyShuffleData(ProxyDataFlow, RNGDataFlow):
         Args:
             ds (DataFlow): input DataFlow.
             buffer_size (int): size of the buffer.
-            nr_reuse (int): reuse each datapoints several times to improve
-                speed, but may hurt your model.
+            nr_reuse (int): duplicate each datapoints several times into the buffer to improve
+                speed, but duplication may hurt your model.
             shuffle_interval (int): shuffle the buffer after this many
-                datapoints went through it. Frequent shuffle on large buffer
-                may affect speed, but infrequent shuffle may affect
-                randomness. Defaults to buffer_size / 3
+                datapoints were produced from the given dataflow. Frequent shuffle on large buffer
+                may affect speed, but infrequent shuffle may not provide enough randomness.
+                Defaults to buffer_size / 3
         """
         ProxyDataFlow.__init__(self, ds)
         self.q = deque(maxlen=buffer_size)
@@ -541,43 +624,38 @@ class LocallyShuffleData(ProxyDataFlow, RNGDataFlow):
             shuffle_interval = int(buffer_size // 3)
         self.shuffle_interval = shuffle_interval
         self.nr_reuse = nr_reuse
+        self._inf_ds = RepeatedData(ds, -1)
         self._guard = DataFlowReentrantGuard()
 
     def reset_state(self):
         ProxyDataFlow.reset_state(self)
         RNGDataFlow.reset_state(self)
-        self.ds_itr = RepeatedData(self.ds, -1).get_data()
-        self.current_cnt = 0
+        self._iter_cnt = 0
+        self._inf_iter = iter(self._inf_ds)
 
-    def _add_data(self):
-        dp = next(self.ds_itr)
-        for _ in range(self.nr_reuse):
-            self.q.append(dp)
+    def __len__(self):
+        return len(self.ds) * self.nr_reuse
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard:
-            # fill queue
-            while self.q.maxlen > len(self.q):
-                self._add_data()
-
-            sz = self.size()
-            cnt = 0
-            while True:
-                self.rng.shuffle(self.q)
-                for _ in range(self.shuffle_interval):
-                    # the inner loop maintains the queue size (almost) unchanged
-                    for _ in range(self.nr_reuse):
+            for dp in self._inf_iter:
+                self._iter_cnt = (self._iter_cnt + 1) % self.shuffle_interval
+                # fill queue
+                if self._iter_cnt == 0:
+                    self.rng.shuffle(self.q)
+                for _ in range(self.nr_reuse):
+                    if self.q.maxlen == len(self.q):
                         yield self.q.popleft()
-                    cnt += self.nr_reuse
-                    if cnt >= sz:
-                        return
-                    self._add_data()
+                    self.q.append(dp)
 
 
 class CacheData(ProxyDataFlow):
     """
     Cache the first pass of a DataFlow completely in memory,
     and produce from the cache thereafter.
+
+    NOTE: The user should not stop the iterator before it has reached the end.
+        Otherwise the cache may be incomplete.
     """
     def __init__(self, ds, shuffle=False):
         """
@@ -595,7 +673,7 @@ class CacheData(ProxyDataFlow):
             self.rng = get_rng(self)
         self.buffer = []
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard:
             if len(self.buffer):
                 if self.shuffle:
@@ -603,7 +681,7 @@ class CacheData(ProxyDataFlow):
                 for dp in self.buffer:
                     yield dp
             else:
-                for dp in self.ds.get_data():
+                for dp in self.ds:
                     yield dp
                     self.buffer.append(dp)
 
@@ -617,12 +695,12 @@ class PrintData(ProxyDataFlow):
 
         .. code-block:: python
 
-            def get_data():
-                ds = CaffeLMDB('path/to/lmdb')
+            def __iter__():
+                ds = SomeDataSource('path/to/lmdb')
                 ds = SomeInscrutableMappings(ds)
-                ds = PrintData(ds, num=2)
+                ds = PrintData(ds, num=2, max_list=2)
                 return ds
-            ds = get_data()
+            ds = __iter__()
 
         The output looks like:
 
@@ -630,88 +708,113 @@ class PrintData(ProxyDataFlow):
 
             [0110 09:22:21 @common.py:589] DataFlow Info:
             datapoint 0<2 with 4 components consists of
-               dp 0: is float of shape () with range [0.0816501893251]
-               dp 1: is ndarray of shape (64, 64) with range [0.1300, 0.6895]
-               dp 2: is ndarray of shape (64, 64) with range [-1.2248, 1.2177]
-               dp 3: is ndarray of shape (9, 9) with range [-0.6045, 0.6045]
+               0: float with value 0.0816501893251
+               1: ndarray:int32 of shape (64,) in range [0, 10]
+               2: ndarray:float32 of shape (64, 64) in range [-1.2248, 1.2177]
+               3: list of len 50
+                  0: ndarray:int32 of shape (64, 64) in range [-128, 80]
+                  1: ndarray:float32 of shape (64, 64) in range [0.8400, 0.6845]
+                  ...
             datapoint 1<2 with 4 components consists of
-               dp 0: is float of shape () with range [5.88252075399]
-               dp 1: is ndarray of shape (64, 64) with range [0.0072, 0.9371]
-               dp 2: is ndarray of shape (64, 64) with range [-0.9011, 0.8491]
-               dp 3: is ndarray of shape (9, 9) with range [-0.5585, 0.5585]
+               0: float with value 5.88252075399
+               1: ndarray:int32 of shape (64,) in range [0, 10]
+               2: ndarray:float32 of shape (64, 64) with range [-0.9011, 0.8491]
+               3: list of len 50
+                  0: ndarray:int32 of shape (64, 64) in range [-70, 50]
+                  1: ndarray:float32 of shape (64, 64) in range [0.7400, 0.3545]
+                  ...
     """
 
-    def __init__(self, ds, num=1, label=None, name=None):
+    def __init__(self, ds, num=1, name=None, max_depth=3, max_list=3):
         """
         Args:
-            ds(DataFlow): input DataFlow.
-            num(int): number of dataflow points to print.
-            name(str, optional): name to identify this DataFlow.
+            ds (DataFlow): input DataFlow.
+            num (int): number of dataflow points to print.
+            name (str, optional): name to identify this DataFlow.
+            max_depth (int, optional): stop output when too deep recursion in sub elements
+            max_list (int, optional): stop output when too many sub elements
         """
         super(PrintData, self).__init__(ds)
         self.num = num
-
-        if label:
-            log_deprecated("PrintData(label, ...", "Use PrintData(name, ... instead.")
-            self.name = label
-        else:
-            self.name = name
+        self.name = name
         self.cnt = 0
+        self.max_depth = max_depth
+        self.max_list = max_list
 
-    def _analyze_input_data(self, entry, k, depth=1):
+    def _analyze_input_data(self, entry, k, depth=1, max_depth=3, max_list=3):
         """
         Gather useful debug information from a datapoint.
 
         Args:
             entry: the datapoint component
-            k (int): index of this compoennt in current datapoint
+            k (int): index of this component in current datapoint
             depth (int, optional): recursion depth
-
-        Todo:
-            * call this recursively and stop when depth>n for some n if an element is a list
+            max_depth, max_list: same as in :meth:`__init__`.
 
         Returns:
             string: debug message
         """
-        el = entry
-        if isinstance(el, list):
-            return "%s is list of %i elements" % (" " * (depth * 2), len(el))
-        else:
-            el_type = el.__class__.__name__
 
-            if isinstance(el, (int, float, bool)):
-                el_max = el_min = el
-                el_shape = "()"
-                el_range = el
-            else:
-                el_shape = "n.A."
-                if hasattr(el, 'shape'):
-                    el_shape = el.shape
+        class _elementInfo(object):
+            def __init__(self, el, pos, depth=0, max_list=3):
+                self.shape = ""
+                self.type = type(el).__name__
+                self.dtype = ""
+                self.range = ""
 
-                el_max, el_min = None, None
-                if hasattr(el, 'max'):
-                    el_max = el.max()
-                if hasattr(el, 'min'):
-                    el_min = el.min()
+                self.sub_elements = []
 
-                el_range = ("None, None")
-                if el_max is not None or el_min is not None:
-                    el_range = "%.4f, %.4f" % (el_min, el_max)
+                self.ident = " " * (depth * 2)
+                self.pos = pos
 
-            return ("%s dp %i: is %s of shape %s with range [%s]" % (" " * (depth * 2), k, el_type, el_shape, el_range))
+                numpy_scalar_types = list(itertools.chain(*np.sctypes.values()))
+
+                if isinstance(el, (int, float, bool)):
+                    self.range = " with value {}".format(el)
+                elif type(el) is np.ndarray:
+                    self.shape = " of shape {}".format(el.shape)
+                    self.dtype = ":{}".format(str(el.dtype))
+                    self.range = " in range [{}, {}]".format(el.min(), el.max())
+                elif type(el) in numpy_scalar_types:
+                    self.range = " with value {}".format(el)
+                elif isinstance(el, (list)):
+                    self.shape = " of len {}".format(len(el))
+
+                    if depth < max_depth:
+                        for k, subel in enumerate(el):
+                            if k < max_list:
+                                self.sub_elements.append(_elementInfo(subel, k, depth + 1, max_list))
+                            else:
+                                self.sub_elements.append(" " * ((depth + 1) * 2) + '...')
+                                break
+                    else:
+                        if len(el) > 0:
+                            self.sub_elements.append(" " * ((depth + 1) * 2) + ' ...')
+
+            def __str__(self):
+                strings = []
+                vals = (self.ident, self.pos, self.type, self.dtype, self.shape, self.range)
+                strings.append("{}{}: {}{}{}{}".format(*vals))
+
+                for k, el in enumerate(self.sub_elements):
+                    strings.append(str(el))
+                return "\n".join(strings)
+
+        return str(_elementInfo(entry, k, depth, max_list))
 
     def _get_msg(self, dp):
         msg = [u"datapoint %i<%i with %i components consists of" % (self.cnt, self.num, len(dp))]
         for k, entry in enumerate(dp):
-            msg.append(self._analyze_input_data(entry, k))
+            msg.append(self._analyze_input_data(entry, k, max_depth=self.max_depth, max_list=self.max_list))
         return u'\n'.join(msg)
 
-    def get_data(self):
-        if self.cnt == 0:
-            label = "" if self.name is None else " (" + self.label + ")"
-            logger.info(colored("DataFlow Info%s:" % label, 'cyan'))
+    def __iter__(self):
+        for dp in self.ds:
+            # it is important to place this here! otherwise it mixes the output of multiple PrintData
+            if self.cnt == 0:
+                label = ' (%s)' % self.name if self.name is not None else ""
+                logger.info(colored("DataFlow Info%s:" % label, 'cyan'))
 
-        for dp in self.ds.get_data():
             if self.cnt < self.num:
                 print(self._get_msg(dp))
                 self.cnt += 1

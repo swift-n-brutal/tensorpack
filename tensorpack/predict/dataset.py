@@ -1,24 +1,22 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: dataset.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
 
-from six.moves import range, zip
-from abc import ABCMeta, abstractmethod
+
 import multiprocessing
 import os
+from abc import ABCMeta, abstractmethod
 import six
+from six.moves import range, zip
 
 from ..dataflow import DataFlow
-from ..dataflow.dftools import dump_dataflow_to_process_queue
-from ..utils.concurrency import ensure_proc_terminate, OrderedResultGatherProc, DIE
+from ..dataflow.remote import dump_dataflow_to_process_queue
 from ..utils import logger
+from ..utils.concurrency import DIE, OrderedResultGatherProc, ensure_proc_terminate
+from ..utils.gpu import change_gpu, get_num_gpu
 from ..utils.utils import get_tqdm
-from ..utils.gpu import change_gpu
-
+from .base import OfflinePredictor
 from .concurrency import MultiProcessQueuePredictWorker
 from .config import PredictConfig
-from .base import OfflinePredictor
 
 __all__ = ['DatasetPredictorBase', 'SimpleDatasetPredictor',
            'MultiProcessDatasetPredictor']
@@ -68,19 +66,19 @@ class SimpleDatasetPredictor(DatasetPredictorBase):
     def get_result(self):
         self.dataset.reset_state()
         try:
-            sz = self.dataset.size()
+            sz = len(self.dataset)
         except NotImplementedError:
             sz = 0
         with get_tqdm(total=sz, disable=(sz == 0)) as pbar:
-            for dp in self.dataset.get_data():
-                res = self.predictor(dp)
+            for dp in self.dataset:
+                res = self.predictor(*dp)
                 yield res
                 pbar.update()
 
 
 class MultiProcessDatasetPredictor(DatasetPredictorBase):
     """
-    Run prediction in multiprocesses, on either CPU or GPU.
+    Run prediction in multiple processes, on either CPU or GPU.
     Each process fetch datapoints as tasks and run predictions independently.
     """
     # TODO allow unordered
@@ -100,7 +98,7 @@ class MultiProcessDatasetPredictor(DatasetPredictorBase):
         """
         if config.return_input:
             logger.warn("Using the option `return_input` in MultiProcessDatasetPredictor might be slow")
-        assert nr_proc > 1, nr_proc
+        assert nr_proc >= 1, nr_proc
         super(MultiProcessDatasetPredictor, self).__init__(config, dataset)
 
         self.nr_proc = nr_proc
@@ -112,12 +110,11 @@ class MultiProcessDatasetPredictor(DatasetPredictorBase):
         if use_gpu:
             try:
                 gpus = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-                assert len(gpus) >= self.nr_proc, \
-                    "nr_proc={} while only {} gpus available".format(
-                    self.nr_proc, len(gpus))
             except KeyError:
-                # TODO number of GPUs not checked
-                gpus = list(range(self.nr_proc))
+                gpus = list(range(get_num_gpu()))
+            assert len(gpus) >= self.nr_proc, \
+                "nr_proc={} while only {} gpus available".format(
+                self.nr_proc, len(gpus))
         else:
             gpus = ['-1'] * self.nr_proc
         # worker produces (idx, result) to outqueue
@@ -147,7 +144,7 @@ class MultiProcessDatasetPredictor(DatasetPredictorBase):
 
     def get_result(self):
         try:
-            sz = self.dataset.size()
+            sz = len(self.dataset)
         except NotImplementedError:
             sz = 0
         with get_tqdm(total=sz, disable=(sz == 0)) as pbar:

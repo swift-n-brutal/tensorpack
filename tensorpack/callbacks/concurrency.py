@@ -1,12 +1,12 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: concurrency.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+
 
 import multiprocessing as mp
-from .base import Callback
-from ..utils.concurrency import start_proc_mask_signal, StoppableThread
+
 from ..utils import logger
+from ..utils.concurrency import StoppableThread, start_proc_mask_signal
+from .base import Callback
 
 __all__ = ['StartProcOrThread']
 
@@ -16,6 +16,8 @@ class StartProcOrThread(Callback):
     Start some threads or processes before training.
     """
 
+    _chief_only = False
+
     def __init__(self, startable, stop_at_last=True):
         """
         Args:
@@ -24,7 +26,7 @@ class StartProcOrThread(Callback):
             stop_at_last (bool): whether to stop the processes or threads
                 after training. It will use :meth:`Process.terminate()` or
                 :meth:`StoppableThread.stop()`, but will do nothing on normal
-                `threading.Thread` or other startable objects.
+                ``threading.Thread`` or other startable objects.
         """
         if not isinstance(startable, list):
             startable = [startable]

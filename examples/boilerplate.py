@@ -1,12 +1,11 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Author: Your Name <your@email.com>
 
-import os
 import argparse
-from tensorpack import *
-from tensorpack.utils.gpu import get_nr_gpu
+import os
 import tensorflow as tf
+
+from tensorpack import *
 
 """
 This is a boiler-plate template.
@@ -19,19 +18,18 @@ CHANNELS = 3
 
 
 class Model(ModelDesc):
-    def _get_inputs(self):
-        return [InputDesc(tf.float32, (None, SHAPE, SHAPE, CHANNELS), 'input'),
-                InputDesc(tf.int32, (None,), 'label')]
+    def inputs(self):
+        return [tf.placeholder(tf.float32, (None, SHAPE, SHAPE, CHANNELS), 'input1'),
+                tf.placeholder(tf.int32, (None,), 'input2')]
 
-    def _build_graph(self, inputs):
-        image, label = inputs
-        image = image * 2 - 1
+    def build_graph(self, input1, input2):
 
-        self.cost = tf.identity(0., name='total_costs')
-        summary.add_moving_summary(self.cost)
+        cost = tf.identity(input1 - input2, name='total_costs')
+        summary.add_moving_summary(cost)
+        return cost
 
-    def _get_optimizer(self):
-        lr = symbolic_functions.get_scalar_var('learning_rate', 5e-3, summary=True)
+    def optimizer(self):
+        lr = tf.get_variable('learning_rate', initializer=5e-3, trainable=False)
         return tf.train.AdamOptimizer(lr)
 
 
@@ -52,12 +50,12 @@ def get_config():
 
     return TrainConfig(
         model=Model(),
-        dataflow=ds_train,
+        data=QueueInput(ds_train),
         callbacks=[
             ModelSaver(),
             InferenceRunner(ds_test, [ScalarStats('total_costs')]),
         ],
-        steps_per_epoch=ds_train.size(),
+        steps_per_epoch=len(ds_train),
         max_epoch=100,
     )
 
@@ -73,9 +71,7 @@ if __name__ == '__main__':
 
     config = get_config()
 
-    if args.gpu:
-        config.nr_tower = len(args.gpu.split(','))
     if args.load:
         config.session_init = SaverRestore(args.load)
 
-    SyncMultiGPUTrainer(config).train()
+    launch_train_with_config(config, SimpleTrainer())

@@ -1,14 +1,17 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: argscope.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
-from contextlib import contextmanager
-from collections import defaultdict
-import inspect
-import copy
-import six
 
-__all__ = ['argscope', 'get_arg_scope']
+import copy
+from collections import defaultdict
+from contextlib import contextmanager
+from functools import wraps
+from inspect import getmembers, isfunction
+
+from ..utils import logger
+from .tower import get_current_tower_context
+
+__all__ = ['argscope', 'get_arg_scope', 'enable_argscope_for_module',
+           'enable_argscope_for_function']
 
 _ArgScopeStack = []
 
@@ -35,14 +38,14 @@ def argscope(layers, **kwargs):
     if not isinstance(layers, list):
         layers = [layers]
 
-    def _check_args_exist(l):
-        args = inspect.getargspec(l).args
-        for k, v in six.iteritems(kwargs):
-            assert k in args, "No argument {} in {}".format(k, l.__name__)
+    # def _check_args_exist(l):
+    #     args = inspect.getargspec(l).args
+    #     for k, v in six.iteritems(kwargs):
+    #         assert k in args, "No argument {} in {}".format(k, l.__name__)
 
     for l in layers:
         assert hasattr(l, 'symbolic_function'), "{} is not a registered layer".format(l.__name__)
-        _check_args_exist(l.symbolic_function)
+        # _check_args_exist(l.symbolic_function)
 
     new_scope = copy.copy(get_arg_scope())
     for l in layers:
@@ -63,3 +66,79 @@ def get_arg_scope():
         return _ArgScopeStack[-1]
     else:
         return defaultdict(dict)
+
+
+def enable_argscope_for_function(func, log_shape=True):
+    """Decorator for function to support argscope
+
+    Example:
+
+        .. code-block:: python
+
+            from mylib import myfunc
+            myfunc = enable_argscope_for_function(myfunc)
+
+    Args:
+        func: A function mapping one or multiple tensors to one or multiple
+            tensors.
+        log_shape (bool): Specify whether the first input resp. output tensor
+            shape should be printed once.
+
+    Remarks:
+        If the function ``func`` returns multiple input or output tensors,
+        only the first input/output tensor shape is displayed during logging.
+
+    Returns:
+        The decorated function.
+
+    """
+
+    assert callable(func), "func should be a callable"
+
+    @wraps(func)
+    def wrapped_func(*args, **kwargs):
+        actual_args = copy.copy(get_arg_scope()[func.__name__])
+        actual_args.update(kwargs)
+        out_tensor = func(*args, **actual_args)
+        in_tensor = args[0]
+
+        ctx = get_current_tower_context()
+        name = func.__name__ if 'name' not in kwargs else kwargs['name']
+        if log_shape:
+            if ('tower' not in ctx.ns_name.lower()) or ctx.is_main_training_tower:
+                # we assume the first parameter is the most interesting
+                if isinstance(out_tensor, tuple):
+                    out_tensor_descr = out_tensor[0]
+                else:
+                    out_tensor_descr = out_tensor
+                logger.info('%20s: %20s -> %20s' %
+                            (name, in_tensor.shape.as_list(),
+                             out_tensor_descr.shape.as_list()))
+
+        return out_tensor
+    # argscope requires this property
+    wrapped_func.symbolic_function = None
+    return wrapped_func
+
+
+def enable_argscope_for_module(module, log_shape=True):
+    """
+    Overwrite all functions of a given module to support argscope.
+    Note that this function monkey-patches the module and therefore could
+    have unexpected consequences.
+    It has been only tested to work well with ``tf.layers`` module.
+
+    Example:
+
+        .. code-block:: python
+
+            import tensorflow as tf
+            enable_argscope_for_module(tf.layers)
+
+    Args:
+        log_shape (bool): print input/output shapes of each function.
+    """
+    for name, obj in getmembers(module):
+        if isfunction(obj):
+            setattr(module, name, enable_argscope_for_function(obj,
+                    log_shape=log_shape))

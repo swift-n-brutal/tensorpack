@@ -1,6 +1,11 @@
 tensorpack.utils package
 ========================
 
+.. automodule:: tensorpack.utils
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 tensorpack.utils.argtools module
 --------------------------------
 
@@ -22,14 +27,6 @@ tensorpack.utils.fs module
 --------------------------
 
 .. automodule:: tensorpack.utils.fs
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-tensorpack.utils.globvars module
---------------------------------
-
-.. automodule:: tensorpack.utils.globvars
     :members:
     :undoc-members:
     :show-inheritance:
@@ -59,6 +56,15 @@ tensorpack.utils.serialize module
     :undoc-members:
     :show-inheritance:
 
+tensorpack.utils.compatible_serialize module
+--------------------------------------------
+
+.. automodule:: tensorpack.utils.compatible_serialize
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+
 tensorpack.utils.stats module
 -----------------------------
 
@@ -79,6 +85,14 @@ tensorpack.utils.viz module
 ---------------------------
 
 .. automodule:: tensorpack.utils.viz
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+tensorpack.utils.gpu module
+---------------------------
+
+.. automodule:: tensorpack.utils.gpu
     :members:
     :undoc-members:
     :show-inheritance:

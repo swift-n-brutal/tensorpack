@@ -1,12 +1,13 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: multigpu.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+
 
 import tensorflow as tf
+
+from ..graph_builder.model_desc import InputDesc
+from ..input_source import PlaceholderInput
+from ..tfutils.tower import PredictTowerContext
 from ..utils import logger
-from ..graph_builder.predictor_factory import PredictorFactory
-from ..graph_builder.input_source import PlaceholderInput
 from .base import OnlinePredictor
 
 __all__ = ['MultiTowerOfflinePredictor',
@@ -14,7 +15,9 @@ __all__ = ['MultiTowerOfflinePredictor',
 
 
 class MultiTowerOfflinePredictor(OnlinePredictor):
-    """ A multi-tower multi-GPU predictor. """
+    """ A multi-tower multi-GPU predictor.
+        It builds one predictor for each tower.
+    """
 
     def __init__(self, config, towers):
         """
@@ -28,16 +31,24 @@ class MultiTowerOfflinePredictor(OnlinePredictor):
         self.return_input = config.return_input
         with self.graph.as_default():
             handles = []
-            factory = PredictorFactory(config.model, towers)
+
+            input = PlaceholderInput()
+            input.setup(config.inputs_desc)
+
             for idx, t in enumerate(towers):
                 tower_name = 'tower' + str(t)
-                device = '/gpu:' + str(t)
 
-                with tf.variable_scope(tf.get_variable_scope(), reuse=idx > 0):
-                    handles.append(factory.build(tower_name, device))
+                device = '/gpu:{}'.format(t)
+                with tf.variable_scope(tf.get_variable_scope(), reuse=idx > 0), \
+                        tf.device(device), \
+                        PredictTowerContext(tower_name):
+                    logger.info("Building graph for predict tower '{}' on device {} ...".format(tower_name, device))
+                    config.tower_func(*input.get_input_tensors())
+                    handles.append(config.tower_func.towers[-1])
 
+            config.session_init._setup_graph()
             self.sess = config.session_creator.create_session()
-            config.session_init.init(self.sess)
+            config.session_init._run_init(self.sess)
 
             for h in handles:
                 input_tensors = h.get_tensors(config.input_names)
@@ -69,7 +80,8 @@ class MultiTowerOfflinePredictor(OnlinePredictor):
 
 class DataParallelOfflinePredictor(OnlinePredictor):
     """
-    A data-parallel predictor.
+    A data-parallel predictor. It builds one predictor that utilizes all GPUs.
+
     Note that it doesn't split/concat inputs/outputs automatically.
     Instead, its inputs are:
     ``[input[0] in tower[0], input[1] in tower[0], ..., input[0] in tower[1], input[1] in tower[1], ...]``
@@ -87,19 +99,24 @@ class DataParallelOfflinePredictor(OnlinePredictor):
             input_tensors = []
             output_tensors = []
 
-            factory = PredictorFactory(config.model, towers)
             for idx, t in enumerate(towers):
                 tower_name = 'tower' + str(t)
-                device = '/gpu:' + str(t)
-                input = PlaceholderInput(tower_name + '/')
-                input.setup(config.model.get_inputs_desc())
 
-                with tf.variable_scope(tf.get_variable_scope(), reuse=idx > 0):
-                    h = factory.build(tower_name, device, )
+                inputs_desc = [InputDesc(desc.type, desc.shape, tower_name + '_' + desc.name)
+                               for desc in config.inputs_desc]
+                input = PlaceholderInput()
+                input.setup(inputs_desc)
+
+                with tf.variable_scope(tf.get_variable_scope(), reuse=idx > 0), \
+                        tf.device('/gpu:{}'.format(t)), \
+                        PredictTowerContext(tower_name):
+                    config.tower_func(*input.get_input_tensors())
+                    h = config.tower_func.towers[-1]
                     input_tensors.extend(h.get_tensors(config.input_names))
                     output_tensors.extend(h.get_tensors(config.output_names))
 
+            config.session_init._setup_graph()
             sess = config.session_creator.create_session()
-            config.session_init.init(sess)
+            config.session_init._run_init(sess)
             super(DataParallelOfflinePredictor, self).__init__(
                 input_tensors, output_tensors, config.return_input, sess)

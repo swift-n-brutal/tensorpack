@@ -1,15 +1,15 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: raw.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
 
-import numpy as np
+
 import copy
+import numpy as np
 import six
 from six.moves import range
+
 from .base import DataFlow, RNGDataFlow
 
-__all__ = ['FakeData', 'DataFromQueue', 'DataFromList', 'DataFromGenerator']
+__all__ = ['FakeData', 'DataFromQueue', 'DataFromList', 'DataFromGenerator', 'DataFromIterable']
 
 
 class FakeData(RNGDataFlow):
@@ -34,10 +34,10 @@ class FakeData(RNGDataFlow):
         assert len(self.dtype) == len(self.shapes)
         assert len(self.domain) == len(self.domain)
 
-    def size(self):
+    def __len__(self):
         return self._size
 
-    def get_data(self):
+    def __iter__(self):
         if self.random:
             for _ in range(self._size):
                 val = []
@@ -63,28 +63,28 @@ class DataFromQueue(DataFlow):
         """
         self.queue = queue
 
-    def get_data(self):
+    def __iter__(self):
         while True:
             yield self.queue.get()
 
 
 class DataFromList(RNGDataFlow):
-    """ Produce data from a list"""
+    """ Wrap a list of datapoints to a DataFlow"""
 
     def __init__(self, lst, shuffle=True):
         """
         Args:
-            lst (list): input list.
+            lst (list): input list. Each element is a datapoint.
             shuffle (bool): shuffle data.
         """
         super(DataFromList, self).__init__()
         self.lst = lst
         self.shuffle = shuffle
 
-    def size(self):
+    def __len__(self):
         return len(self.lst)
 
-    def get_data(self):
+    def __iter__(self):
         if not self.shuffle:
             for k in self.lst:
                 yield k
@@ -97,18 +97,38 @@ class DataFromList(RNGDataFlow):
 
 class DataFromGenerator(DataFlow):
     """
-    Wrap a generator to a DataFlow
+    Wrap a generator to a DataFlow.
+    The dataflow will not have length.
     """
-    def __init__(self, gen, size=None):
-        self._gen = gen
-        self._size = size
+    def __init__(self, gen):
+        """
+        Args:
+            gen: iterable, or a callable that returns an iterable
+        """
+        if not callable(gen):
+            self._gen = lambda: gen
+        else:
+            self._gen = gen
 
-    def size(self):
-        if self._size:
-            return self._size
-        return super(DataFromGenerator, self).size()
-
-    def get_data(self):
+    def __iter__(self):
         # yield from
-        for dp in self._gen:
+        for dp in self._gen():
+            yield dp
+
+
+class DataFromIterable(DataFlow):
+    """ Wrap an iterable of datapoints to a DataFlow"""
+    def __init__(self, iterable):
+        """
+        Args:
+            iterable: an iterable object with length
+        """
+        self._itr = iterable
+        self._len = len(iterable)
+
+    def __len__(self):
+        return self._len
+
+    def __iter__(self):
+        for dp in self._itr:
             yield dp

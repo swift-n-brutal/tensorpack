@@ -1,28 +1,26 @@
-#!/usr/bin/env python
-# -*- coding: UTF-8 -*-
+# -*- coding: utf-8 -*-
 # File: mnist.py
-# Author: Yuxin Wu <ppwwyyxx@gmail.com>
 
-import os
+
 import gzip
 import numpy
+import os
 from six.moves import range
 
 from ...utils import logger
 from ...utils.fs import download, get_dataset_path
 from ..base import RNGDataFlow
 
-__all__ = ['Mnist']
-
-SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
+__all__ = ['Mnist', 'FashionMnist']
 
 
-def maybe_download(filename, work_directory):
+def maybe_download(url, work_directory):
     """Download the data from Yann's website, unless it's already here."""
+    filename = url.split('/')[-1]
     filepath = os.path.join(work_directory, filename)
     if not os.path.exists(filepath):
-        logger.info("Downloading mnist data to {}...".format(filepath))
-        download(SOURCE_URL + filename, work_directory)
+        logger.info("Downloading to {}...".format(filepath))
+        download(url, work_directory)
     return filepath
 
 
@@ -69,6 +67,9 @@ class Mnist(RNGDataFlow):
     image is 28x28 in the range [0,1], label is an int.
     """
 
+    _DIR_NAME = 'mnist_data'
+    _SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
+
     def __init__(self, train_or_test, shuffle=True, dir=None):
         """
         Args:
@@ -76,15 +77,15 @@ class Mnist(RNGDataFlow):
             shuffle (bool): shuffle the dataset
         """
         if dir is None:
-            dir = get_dataset_path('mnist_data')
+            dir = get_dataset_path(self._DIR_NAME)
         assert train_or_test in ['train', 'test']
         self.train_or_test = train_or_test
         self.shuffle = shuffle
 
         def get_images_and_labels(image_file, label_file):
-            f = maybe_download(image_file, dir)
+            f = maybe_download(self._SOURCE_URL + image_file, dir)
             images = extract_images(f)
-            f = maybe_download(label_file, dir)
+            f = maybe_download(self._SOURCE_URL + label_file, dir)
             labels = extract_labels(f)
             assert images.shape[0] == labels.shape[0]
             return images, labels
@@ -98,11 +99,11 @@ class Mnist(RNGDataFlow):
                 't10k-images-idx3-ubyte.gz',
                 't10k-labels-idx1-ubyte.gz')
 
-    def size(self):
+    def __len__(self):
         return self.images.shape[0]
 
-    def get_data(self):
-        idxs = list(range(self.size()))
+    def __iter__(self):
+        idxs = list(range(self.__len__()))
         if self.shuffle:
             self.rng.shuffle(idxs)
         for k in idxs:
@@ -111,9 +112,28 @@ class Mnist(RNGDataFlow):
             yield [img, label]
 
 
+class FashionMnist(Mnist):
+    """
+    Same API as :class:`Mnist`, but more fashion.
+    """
+
+    _DIR_NAME = 'fashion_mnist_data'
+    _SOURCE_URL = 'http://fashion-mnist.s3-website.eu-central-1.amazonaws.com/'
+
+    def get_label_names(self):
+        """
+        Returns:
+            [str]: the name of each class
+        """
+        # copied from https://github.com/zalandoresearch/fashion-mnist
+        return ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
+                'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot']
+
+
 if __name__ == '__main__':
     ds = Mnist('train')
-    for (img, label) in ds.get_data():
+    ds.reset_state()
+    for (img, label) in ds:
         from IPython import embed
         embed()
         break

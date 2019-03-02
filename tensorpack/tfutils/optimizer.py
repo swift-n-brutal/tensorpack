@@ -1,18 +1,20 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: optimizer.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
 
-import tensorflow as tf
+
 from contextlib import contextmanager
-from .gradproc import FilterNoneGrad
+import tensorflow as tf
+
+from ..tfutils.common import get_tf_version_tuple, tfv1
+from ..utils.develop import HIDE_DOC
+from .gradproc import FilterNoneGrad, GradientProcessor
 
 __all__ = ['apply_grad_processors', 'ProxyOptimizer',
            'PostProcessOptimizer', 'VariableAssignmentOptimizer',
            'AccumGradOptimizer']
 
 
-class ProxyOptimizer(tf.train.Optimizer):
+class ProxyOptimizer(tfv1.train.Optimizer):
     """
     A transparent proxy which delegates all methods of :class:`tf.train.Optimizer`
     """
@@ -21,15 +23,19 @@ class ProxyOptimizer(tf.train.Optimizer):
         super(ProxyOptimizer, self).__init__(False, name)
         self._opt = opt
 
+    @HIDE_DOC
     def compute_gradients(self, *args, **kwargs):
         return self._opt.compute_gradients(*args, **kwargs)
 
+    @HIDE_DOC
     def get_slot(self, *args, **kwargs):
         return self._opt.get_slot(*args, **kwargs)
 
+    @HIDE_DOC
     def get_slot_names(self, *args, **kwargs):
         return self._opt.get_slot_names(*args, **kwargs)
 
+    @HIDE_DOC
     def apply_gradients(self, *args, **kwargs):
         return self._opt.apply_gradients(*args, **kwargs)
 
@@ -48,6 +54,8 @@ def apply_grad_processors(opt, gradprocs):
         processors before updating the variables.
     """
     assert isinstance(gradprocs, (list, tuple)), gradprocs
+    for gp in gradprocs:
+        assert isinstance(gp, GradientProcessor), gp
 
     class _ApplyGradientProcessor(ProxyOptimizer):
         def __init__(self, opt, gradprocs):
@@ -78,12 +86,13 @@ class PostProcessOptimizer(ProxyOptimizer):
             opt (tf.train.Optimizer):
             func (tf.Variable -> tf.Operation or None): the operation needed
                 to perform for this variable after the gradient update.
-            colocate (boolean): colocate the function with the variable.
+            colocate (boolean): colocate the function with the variable. No effect since TF 1.13.
         """
         super(PostProcessOptimizer, self).__init__(opt)
         self._func = func
         self._colocate = colocate
 
+    @HIDE_DOC
     def apply_gradients(self, grads_and_vars, global_step=None, name=None):
         update_op = super(PostProcessOptimizer, self).apply_gradients(
             grads_and_vars, global_step)
@@ -101,7 +110,7 @@ class PostProcessOptimizer(ProxyOptimizer):
     @contextmanager
     def _maybe_colocate(self, var):
         G = tf.get_default_graph()
-        if self._colocate:
+        if self._colocate and get_tf_version_tuple() <= (1, 12):
             with G.colocate_with(var):
                 yield
         else:
@@ -130,10 +139,13 @@ class VariableAssignmentOptimizer(PostProcessOptimizer):
 
 class AccumGradOptimizer(ProxyOptimizer):
     """
-    An optimizer which accumulates gradients across :math:`k` :meth:`minimize` calls,
-    and apply them together in every :math:`k`th :meth:`minimize` call.
-    This is equivalent to using a :math:`k` times larger batch size plus a
+    An optimizer which accumulates gradients across :math:`k` :meth:`minimize` executions,
+    and apply them together in every :math:`k` th :meth:`minimize` execution.
+    This is roughly the same as using a :math:`k` times larger batch size plus a
     :math:`k` times larger learning rate, but uses much less memory.
+
+    Note that this implementation may not support all models.
+    E.g., it doesn't support sparse gradient update.
     """
 
     def __init__(self, opt, niter):
@@ -153,6 +165,7 @@ class AccumGradOptimizer(ProxyOptimizer):
             slots.append(s)
         return slots
 
+    @HIDE_DOC
     def apply_gradients(self, grads_and_vars, global_step=None, name=None):
         assert global_step is None, \
             "AccumGradOptimizer doesn't support the option global_step! " \

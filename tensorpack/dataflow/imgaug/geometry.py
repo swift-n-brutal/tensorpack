@@ -1,11 +1,10 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # File: geometry.py
-# Author: Yuxin Wu <ppwwyyxxc@gmail.com>
+
 
 import math
-import cv2
 import numpy as np
+import cv2
 
 from .base import ImageAugmentor
 from .transform import TransformAugmentorBase, WarpAffineTransform
@@ -69,7 +68,7 @@ class Rotation(TransformAugmentorBase):
         if self.step_deg:
             deg = deg // self.step_deg * self.step_deg
         """
-        The correct center is shape*0.5-0.5 This can be verified by:
+        The correct center is shape*0.5-0.5. This can be verified by:
 
         SHAPE = 7
         arr = np.random.rand(SHAPE, SHAPE)
@@ -157,10 +156,11 @@ class Affine(TransformAugmentorBase):
     """
     Random affine transform of the image w.r.t to the image center.
     Transformations involve:
-        - Translation ("move" image on the x-/y-axis)
-        - Rotation
-        - Scaling ("zoom" in/out)
-        - Shear (move one side of the image, turning a square into a trapezoid)
+
+    - Translation ("move" image on the x-/y-axis)
+    - Rotation
+    - Scaling ("zoom" in/out)
+    - Shear (move one side of the image, turning a square into a trapezoid)
     """
 
     def __init__(self, scale=None, translate_frac=None, rotate_max_deg=0.0, shear=0.0,
